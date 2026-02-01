@@ -1,0 +1,147 @@
+from bottle import get, post, run, request, response
+from pymongo import MongoClient
+from datetime import datetime
+
+# Konfiguracja połączenia
+client = MongoClient('mongodb://localhost:27017/')
+db = client['system_logs']
+collection = db['user_logs']
+
+DEFAULT_PAGE_SIZE = 200
+
+def _parse_date(value):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+def _serialize_log(doc):
+    if not doc:
+        return doc
+    doc = dict(doc)
+    if "_id" in doc:
+        doc["_id"] = str(doc["_id"])
+    if "timestamp" in doc and isinstance(doc["timestamp"], datetime):
+        doc["timestamp"] = doc["timestamp"].isoformat() + "Z"
+    return doc
+
+@post(['/log', '/log/'])
+def save_log():
+    # Pobieranie danych JSON z requestu
+    log_data = request.json
+    
+    if not log_data:
+        response.status = 400
+        return {"status": "error", "message": "Brak danych JSON"}
+
+    # Dodanie znacznika czasu po stronie serwera logów
+    log_data['timestamp'] = datetime.utcnow()
+    log_data['type'] = 'backend' if log_data.get('type') else 'frontend'
+    
+    # Zapis do MongoDB
+    log_id = collection.insert_one(log_data).inserted_id
+    
+    return {"status": "success", "id": str(log_id)}
+
+
+# Example GET: /log?method=GET&controller=Auth&user=42&created_from=2026-01-01&created_to=2026-02-01&page=1&order_by=timestamp&order_dir=desc
+@get(['/log', '/log/'])
+def get_logs():
+    filters = {}
+
+    allowed_order_fields = {
+        "client_ip",
+        "timestamp",
+        "controller",
+        "user",
+        "method",
+        "status_code",
+        "duration",
+    }
+
+    method = request.query.get("method")
+    if method:
+        filters["method"] = method
+
+    controller = request.query.get("controller")
+    if controller:
+        filters["controller"] = {"$regex": controller, "$options": "i"}
+
+    search_text = request.query.get("search_text")
+    if search_text:
+        filters["$or"] = [
+            {"data": {"$regex": search_text, "$options": "i"}},
+            {"response": {"$regex": search_text, "$options": "i"}},
+        ]
+
+    user_value = request.query.get("user")
+    if user_value is not None:
+        try:
+            filters["user"] = int(user_value)
+        except ValueError:
+            response.status = 400
+            return {"status": "error", "message": "Invalid user value"}
+
+    created_from = _parse_date(request.query.get("created_from"))
+    created_to = _parse_date(request.query.get("created_to"))
+    if request.query.get("created_from") and not created_from:
+        response.status = 400
+        return {"status": "error", "message": "Invalid created_from value"}
+    if request.query.get("created_to") and not created_to:
+        response.status = 400
+        return {"status": "error", "message": "Invalid created_to value"}
+
+    if created_from or created_to:
+        filters["timestamp"] = {}
+        if created_from:
+            filters["timestamp"]["$gte"] = created_from
+        if created_to:
+            filters["timestamp"]["$lte"] = created_to
+
+    page_raw = request.query.get("page", "1")
+    try:
+        page = int(page_raw)
+    except ValueError:
+        response.status = 400
+        return {"status": "error", "message": "Invalid page value"}
+    if page < 1:
+        response.status = 400
+        return {"status": "error", "message": "Page must be >= 1"}
+
+    page_size = DEFAULT_PAGE_SIZE
+    skip = (page - 1) * page_size
+
+    total = collection.count_documents(filters)
+    order_by = request.query.get("order_by", "timestamp")
+    if order_by not in allowed_order_fields:
+        response.status = 400
+        return {"status": "error", "message": "Invalid order_by value"}
+
+    order_dir_raw = request.query.get("order_dir", "desc").lower()
+    if order_dir_raw not in {"asc", "desc"}:
+        response.status = 400
+        return {"status": "error", "message": "Invalid order_dir value"}
+    order_dir = 1 if order_dir_raw == "asc" else -1
+
+    cursor = collection.find(filters).sort(order_by, order_dir).skip(skip).limit(page_size)
+    items = [_serialize_log(doc) for doc in cursor]
+
+    return {
+        "status": "success",
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": (total + page_size - 1) // page_size,
+        "items": items,
+    }
+
+if __name__ == "__main__":
+    # Uruchomienie na porcie 8081, aby nie kolidowało z FastAPI (domyślnie 8000)
+    run(host='0.0.0.0', port=8082, debug=True)

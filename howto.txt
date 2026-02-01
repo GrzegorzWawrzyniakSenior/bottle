@@ -1,0 +1,59 @@
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+sudo apt-get update
+sudo apt install -y mongodb-org
+
+sudo systemctl start mongod
+sudo systemctl enable mongod
+
+pip install bottle pymongo
+
+sudo nano /etc/systemd/system/bottle-logger.service
+
+=======================
+[Unit]
+Description=Bottle MongoDB Logger Service
+After=network.target mongod.service
+
+[Service]
+# Zmień 'user' na swoją nazwę użytkownika na Ubuntu
+User=user
+Group=www-data
+# Ścieżka do folderu, w którym znajduje się logger.py
+WorkingDirectory=/home/user/my_project
+# Ścieżka do interpretera python (najlepiej z venv)
+ExecStart=/home/user/my_project/venv/bin/python logger.py
+Restart=always
+# Przerwa przed restartem po awarii
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+============================
+
+
+Przeładuj konfigurację:
+sudo systemctl daemon-reload
+
+Uruchom logger:
+sudo systemctl start bottle-logger
+
+Włącz autostart przy bootowaniu:
+sudo systemctl enable bottle-logger
+
+Jak zarządzać loggerem?
+Sprawdzenie statusu: 
+
+sudo systemctl status bottle-logger
+
+Podgląd logów (konsola): Journalctl to najlepsze narzędzie do debugowania:
+
+##########!!!!!!!!!!!!!!!!!!!!!!!!!!!
+journalctl -u bottle-logger.service -f
+
+--- RELOAD 
+
+sudo systemctl daemon-reload
+sudo systemctl restart bottle-logger
