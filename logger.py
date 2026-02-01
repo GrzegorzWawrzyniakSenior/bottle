@@ -8,6 +8,14 @@ db = client['system_logs']
 collection = db['user_logs']
 
 DEFAULT_PAGE_SIZE = 200
+ALLOWED_LOCAL_IPS = {"127.0.0.1", "::1"}
+
+def _require_local():
+    remote_addr = request.remote_addr or request.environ.get("REMOTE_ADDR")
+    if remote_addr not in ALLOWED_LOCAL_IPS:
+        response.status = 403
+        return {"status": "error", "message": "Forbidden"}
+    return None
 
 def _parse_date(value):
     if not value:
@@ -34,6 +42,9 @@ def _serialize_log(doc):
 
 @post(['/log', '/log/'])
 def save_log():
+    access_error = _require_local()
+    if access_error:
+        return access_error
     # Pobieranie danych JSON z requestu
     log_data = request.json
     
@@ -43,7 +54,7 @@ def save_log():
 
     # Dodanie znacznika czasu po stronie serwera logów
     log_data['timestamp'] = datetime.utcnow()
-    log_data['type'] = 'backend' if log_data.get('type') else 'frontend'
+    log_data['logtype'] = 'backend' if log_data.get('logtype') and log_data.get('logtype') == 'backend' else 'frontend'
     
     # Zapis do MongoDB
     log_id = collection.insert_one(log_data).inserted_id
@@ -54,11 +65,15 @@ def save_log():
 # Example GET: /log?method=GET&controller=Auth&user=42&created_from=2026-01-01&created_to=2026-02-01&page=1&order_by=timestamp&order_dir=desc
 @get(['/log', '/log/'])
 def get_logs():
+    access_error = _require_local()
+    if access_error:
+        return access_error
     filters = {}
 
     allowed_order_fields = {
         "client_ip",
         "timestamp",
+        "user_email",
         "controller",
         "user",
         "method",
@@ -70,9 +85,21 @@ def get_logs():
     if method:
         filters["method"] = method
 
+    logType = request.query.get("logType")
+    if logType:
+        filters["logtype"] = logType
+
+    logtype = request.query.get("logtype")
+    if logtype:
+        filters["logtype"] = logtype
+
     controller = request.query.get("controller")
     if controller:
         filters["controller"] = {"$regex": controller, "$options": "i"}
+
+    user_email = request.query.get("user_email")
+    if user_email:
+        filters["user_email"] = {"$regex": user_email, "$options": "i"}
 
     search_text = request.query.get("search_text")
     if search_text:
