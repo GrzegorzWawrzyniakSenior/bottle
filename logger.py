@@ -1,4 +1,6 @@
 from bottle import get, post, run, request, response
+import json
+import os
 from pymongo import MongoClient
 from datetime import datetime
 
@@ -85,6 +87,10 @@ def get_logs():
     if method:
         filters["method"] = method
 
+    response = request.query.get("response")
+    if response:
+        filters["response"] = response
+
     logType = request.query.get("logType")
     if logType:
         filters["logtype"] = logType
@@ -105,7 +111,7 @@ def get_logs():
     if search_text:
         filters["$or"] = [
             {"data": {"$regex": search_text, "$options": "i"}},
-            {"response": {"$regex": search_text, "$options": "i"}},
+            {"response_body": {"$regex": search_text, "$options": "i"}},
         ]
 
     user_value = request.query.get("user")
@@ -168,6 +174,22 @@ def get_logs():
         "pages": (total + page_size - 1) // page_size,
         "items": items,
     }
+
+@get(['/frontend-config', '/frontend-config/'])
+def get_frontend_config():
+    config_path = os.path.join(os.path.dirname(__file__), "frontend.conf.json")
+    if not os.path.isfile(config_path):
+        response.status = 404
+        return {"status": "error", "message": "Config not found"}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        response.status = 500
+        return {"status": "error", "message": "Failed to load config"}
+
+    response.content_type = "application/json"
+    return config_data
 
 if __name__ == "__main__":
     # Uruchomienie na porcie 8081, aby nie kolidowało z FastAPI (domyślnie 8000)
