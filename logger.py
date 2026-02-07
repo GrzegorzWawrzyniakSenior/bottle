@@ -1,4 +1,4 @@
-from bottle import get, post, run, request, response
+from bottle import get, post, run, request, response, route
 import json
 import os
 from pymongo import MongoClient
@@ -11,6 +11,17 @@ collection = db['user_logs']
 
 DEFAULT_PAGE_SIZE = 200
 ALLOWED_LOCAL_IPS = {"127.0.0.1", "::1"}
+ALLOWED_CORS_ORIGINS = {"*"}
+
+def _apply_cors_headers():
+    origin = request.headers.get("Origin")
+    allow_origin = "*" if "*" in ALLOWED_CORS_ORIGINS else (origin if origin in ALLOWED_CORS_ORIGINS else None)
+    if allow_origin:
+        response.set_header("Access-Control-Allow-Origin", allow_origin)
+        response.set_header("Vary", "Origin")
+    response.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    response.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.set_header("Access-Control-Max-Age", "600")
 
 def _require_local():
     remote_addr = request.remote_addr or request.environ.get("REMOTE_ADDR")
@@ -114,6 +125,10 @@ def get_logs():
             {"response_body": {"$regex": search_text, "$options": "i"}},
         ]
 
+    fk_id = request.query.get("fk_id")
+    if fk_id:
+        filters["path"] = {"$regex": fk_id, "$options": "i"}
+
     user_value = request.query.get("user")
     if user_value is not None:
         try:
@@ -177,7 +192,9 @@ def get_logs():
 
 @get(['/frontend-config', '/frontend-config/'])
 def get_frontend_config():
+    _apply_cors_headers()
     config_path = os.path.join(os.path.dirname(__file__), "frontend.conf.json")
+    whitelist_path = os.path.join(os.path.dirname(__file__), "whitelist.json")
     if not os.path.isfile(config_path):
         response.status = 404
         return {"status": "error", "message": "Config not found"}
@@ -188,8 +205,27 @@ def get_frontend_config():
         response.status = 500
         return {"status": "error", "message": "Failed to load config"}
 
+    whitelist_ips = []
+    if os.path.isfile(whitelist_path):
+        try:
+            with open(whitelist_path, "r", encoding="utf-8") as f:
+                whitelist_data = json.load(f)
+            whitelist_ips = whitelist_data.get("ip", []) if isinstance(whitelist_data, dict) else []
+        except (OSError, json.JSONDecodeError):
+            whitelist_ips = []
+
+    remote_addr = request.remote_addr or request.environ.get("REMOTE_ADDR")
+    if remote_addr in whitelist_ips:
+        config_data["maintenece_mode"] = False
+
     response.content_type = "application/json"
     return config_data
+
+@route(['/frontend-config', '/frontend-config/'], method='OPTIONS')
+def frontend_config_options():
+    _apply_cors_headers()
+    response.status = 204
+    return ""
 
 if __name__ == "__main__":
     # Uruchomienie na porcie 8081, aby nie kolidowało z FastAPI (domyślnie 8000)
