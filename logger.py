@@ -1,8 +1,37 @@
-from bottle import get, post, run, request, response, route
+from bottle import get, post, run, request, response, route, ServerAdapter
 import json
 import os
 from pymongo import MongoClient
 from datetime import datetime
+from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
+
+
+class _QuietHandler(WSGIRequestHandler):
+    """Suppress ConnectionResetError caused by clients dropping the connection."""
+    def handle(self):
+        try:
+            super().handle()
+        except ConnectionResetError:
+            pass
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass  # silence per-request access log (goes to journald anyway)
+
+
+class _QuietServer(WSGIServer):
+    def handle_error(self, request, client_address):
+        pass  # suppress tracebacks for all socket-level errors
+
+
+class QuietWSGIRefServer(ServerAdapter):
+    """wsgiref adapter that swallows ConnectionResetError from impatient clients."""
+    def run(self, app):
+        httpd = make_server(
+            self.host, self.port, app,
+            server_class=_QuietServer,
+            handler_class=_QuietHandler,
+        )
+        httpd.serve_forever()
 
 # Konfiguracja połączenia
 client = MongoClient('mongodb://localhost:27017/')
@@ -229,4 +258,4 @@ def frontend_config_options():
 
 if __name__ == "__main__":
     # Uruchomienie na porcie 8081, aby nie kolidowało z FastAPI (domyślnie 8000)
-    run(host='0.0.0.0', port=8082, debug=True)
+    run(host='0.0.0.0', port=8082, debug=False, server=QuietWSGIRefServer)
