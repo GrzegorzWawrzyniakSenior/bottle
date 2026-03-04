@@ -8,10 +8,51 @@ sudo apt install -y mongodb-org
 sudo systemctl start mongod
 sudo systemctl enable mongod
 
+python3 -m venv venv
+
 pip install bottle pymongo
 
-sudo nano /etc/systemd/system/bottle-logger.service
 
+===== CREATE USER FOR MONGO =========
+sudo nano /etc/mongod.conf
+---
+security:
+  authorization: enabled
+---
+
+using mongosh
+
+system_logs> db.createUser({ user: "s", pwd: "eeeee!", roles: [ { role: "readWrite", db: "system_logs" } ]})
+
+db.createUser({
+  user: "system_logs",
+  pwd: "Lato2020!",
+  roles: [
+    { role: "readWrite", db: "system_logs" }
+  ]
+})
+
+ 
+{ ok: 1 }
+
+system_logs> db.getUsers()
+{
+  users: [
+    {
+      _id: 'system_logs.admin',
+      userId: UUID('e41212bd-41f9-49f1-9999-5f3d76bd7fe8'),
+      user: 'admin',
+      db: 'system_logs',
+      roles: [ { role: 'root', db: 'admin' } ],
+      mechanisms: [ 'SCRAM-SHA-1', 'SCRAM-SHA-256' ]
+    }
+  ],
+  ok: 1
+}
+
+
+===== SERVICE ===============
+sudo nano /etc/systemd/system/bottle-logger.service
 =======================
 [Unit]
 Description=Bottle MongoDB Logger Service
@@ -57,3 +98,43 @@ journalctl -u bottle-logger.service -f
 
 sudo systemctl daemon-reload
 sudo systemctl restart bottle-logger
+
+
+///// BUG FIXINIG
+sudo nano /etc/systemd/system/bottle-logger.service
+
+
+========== CENNECTION TO MONGO VPS ============
+🔐 Teraz — poprawne połączenie przez SSH Tunnel
+
+Na swoim lokalnym Ubuntu uruchom:
+
+ssh -N -L 27018:localhost:27017 user@twoj_vps_ip
+
+Tunel musi pozostać aktywny (terminal otwarty).
+
+🔎 Sprawdzenie czy tunel działa
+
+W nowym terminalu:
+
+nc -zv localhost 27018
+
+Powinno być:
+
+Connection to localhost 27018 succeeded
+⚙ Konfiguracja w MongoDB Compass 1.49.1
+Opcja 1 — używasz ręcznego tunelu (najprostsze)
+
+W Compass:
+
+Hostname: localhost
+
+Port: 27018
+
+Authentication: Username / Password
+
+Username: root
+
+Password: (Twoje hasło)
+
+Authentication Database: admin

@@ -34,7 +34,7 @@ class QuietWSGIRefServer(ServerAdapter):
         httpd.serve_forever()
 
 # Konfiguracja połączenia
-client = MongoClient('mongodb://localhost:27017/')
+client = MongoClient('mongodb://admin:Lato2020!@localhost:27017/')
 db = client['system_logs']
 collection = db['user_logs']
 
