@@ -39,7 +39,7 @@ client = MongoClient('mongodb://admin:Lato2020!@localhost:27017/')
 db = client['system_logs']
 collection = db['user_logs']
 
-DEFAULT_PAGE_SIZE = 200
+DEFAULT_PAGE_SIZE = 20
 ALLOWED_LOCAL_IPS = {"127.0.0.1", "::1"}
 ALLOWED_CORS_ORIGINS = {"*"}
 
@@ -123,10 +123,6 @@ def save_log():
     # Dodanie znacznika czasu po stronie serwera logów
     log_data['timestamp'] = datetime.utcnow()
     log_data['logtype'] = 'backend' if log_data.get('logtype') and log_data.get('logtype') == 'backend' else 'frontend'
-    
-    # DEBUG: Show raw received data
-    print('[DEBUG save_log] RAW received data field:', repr(log_data.get('data')))
-    print('[DEBUG save_log] RAW received response_body:', repr(log_data.get('response_body')))
 
     # Normalize `data` to a UTF-8 JSON string (no \uXXXX escapes)
     if 'data' in log_data and log_data['data'] is not None:
@@ -157,11 +153,6 @@ def save_log():
             rb = rb[:512]
         log_data['response_body'] = rb
 
-    # DEBUG: show exactly what gets stored (after ensure_ascii=True encoding)
-    print('[DEBUG save_log] STORED data field:', repr(log_data.get('data')))
-    print('[DEBUG save_log] STORED response_body:', repr(log_data.get('response_body')))
-    print('[DEBUG save_log] STORED data bytes:', log_data.get('data').encode('utf-8') if log_data.get('data') else None)
-
     # Zapis do MongoDB
     log_id = collection.insert_one(log_data).inserted_id
     
@@ -171,8 +162,6 @@ def save_log():
 # Example GET: /log?method=GET&controller=Auth&user=42&created_from=2026-01-01&created_to=2026-02-01&page=1&order_by=timestamp&order_dir=desc
 @get(['/log', '/log/'])
 def get_logs():
-    print('[DEBUG get_logs] ========== SEARCH DEBUG ==========')
-    print('[DEBUG get_logs] data field repr:', request.query.get("search_text"))
     access_error = _require_local()
     if access_error:
         return access_error
@@ -228,11 +217,6 @@ def get_logs():
         # The pattern also matches literal \uXXXX escape sequences that may
         # have been stored by older records with ensure_ascii=True.
         pattern = _build_search_regex(search_text)
-        print('[DEBUG get_logs] ========== SEARCH DEBUG ==========')
-        print('[DEBUG get_logs] search_text received (after mojibake fix):', repr(search_text))
-        print('[DEBUG get_logs] search_text bytes:', search_text.encode('utf-8'))
-        print('[DEBUG get_logs] regex pattern:', repr(pattern))
-      
         filters["$or"] = [
             {"data": {"$regex": pattern, "$options": "i"}},
             {"response_body": {"$regex": pattern, "$options": "i"}},
@@ -312,7 +296,6 @@ def get_logs():
 @get(['/frontend-config', '/frontend-config/'])
 def get_frontend_config():
     _apply_cors_headers()
-    print('[DEBUG get_frontend_config] ========== CONFIG DEBUG ==========')
     config_path = os.path.join(os.path.dirname(__file__), "frontend.conf.json")
     whitelist_path = os.path.join(os.path.dirname(__file__), "whitelist.json")
     if not os.path.isfile(config_path):
