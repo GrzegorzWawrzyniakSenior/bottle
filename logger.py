@@ -1,6 +1,7 @@
 from bottle import get, post, run, request, response, route, ServerAdapter
 import json
 import os
+import re
 from pymongo import MongoClient
 from datetime import datetime
 from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
@@ -72,6 +73,31 @@ def _parse_date(value):
     except ValueError:
         return None
 
+
+def _fix_mojibake(text):
+    """Detect and fix double-encoded UTF-8 (mojibake).
+    If UTF-8 bytes were incorrectly interpreted as Latin-1, fix them."""
+    try:
+        # Try to encode as Latin-1, then decode as UTF-8
+        # This reverses the mojibake: Åº → ź
+        return text.encode('latin1').decode('utf-8')
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        # Not mojibake, return original
+        return text
+
+
+def _build_search_regex(text):
+    """Build a MongoDB regex pattern converting non-ASCII characters to their
+    \\uXXXX literal form, matching how json.dumps(ensure_ascii=True) stores them."""
+    pattern = ''
+    for char in text:
+        if ord(char) > 127:
+            # e.g. ź (U+017A) → \\u017a in the regex → matches literal \u017a in stored data
+            pattern += '\\\\u{:04x}'.format(ord(char))
+        else:
+            pattern += re.escape(char)
+    return pattern
+
 def _serialize_log(doc):
     if not doc:
         return doc
@@ -98,6 +124,44 @@ def save_log():
     log_data['timestamp'] = datetime.utcnow()
     log_data['logtype'] = 'backend' if log_data.get('logtype') and log_data.get('logtype') == 'backend' else 'frontend'
     
+    # DEBUG: Show raw received data
+    print('[DEBUG save_log] RAW received data field:', repr(log_data.get('data')))
+    print('[DEBUG save_log] RAW received response_body:', repr(log_data.get('response_body')))
+
+    # Normalize `data` to a UTF-8 JSON string (no \uXXXX escapes)
+    if 'data' in log_data and log_data['data'] is not None:
+        d = log_data['data']
+        if isinstance(d, str):
+            try:
+                # Re-encode parsed JSON with ensure_ascii=True to store \uXXXX escapes (pure ASCII)
+                log_data['data'] = json.dumps(json.loads(d), ensure_ascii=True)
+            except (ValueError, TypeError):
+                log_data['data'] = d
+        elif isinstance(d, (dict, list)):
+            log_data['data'] = json.dumps(d, ensure_ascii=True)
+
+    # Ensure `response_body` is a UTF-8 string of at most 512 characters
+    if 'response_body' in log_data and log_data['response_body'] is not None:
+        rb = log_data['response_body']
+        if isinstance(rb, str):
+            try:
+                rb = json.dumps(json.loads(rb), ensure_ascii=True)
+            except (ValueError, TypeError):
+                pass
+        else:
+            try:
+                rb = json.dumps(rb, ensure_ascii=True)
+            except Exception:
+                rb = str(rb)
+        if len(rb) > 512:
+            rb = rb[:512]
+        log_data['response_body'] = rb
+
+    # DEBUG: show exactly what gets stored (after ensure_ascii=True encoding)
+    print('[DEBUG save_log] STORED data field:', repr(log_data.get('data')))
+    print('[DEBUG save_log] STORED response_body:', repr(log_data.get('response_body')))
+    print('[DEBUG save_log] STORED data bytes:', log_data.get('data').encode('utf-8') if log_data.get('data') else None)
+
     # Zapis do MongoDB
     log_id = collection.insert_one(log_data).inserted_id
     
@@ -107,10 +171,13 @@ def save_log():
 # Example GET: /log?method=GET&controller=Auth&user=42&created_from=2026-01-01&created_to=2026-02-01&page=1&order_by=timestamp&order_dir=desc
 @get(['/log', '/log/'])
 def get_logs():
+    print('[DEBUG get_logs] ========== SEARCH DEBUG ==========')
+    print('[DEBUG get_logs] data field repr:', request.query.get("search_text"))
     access_error = _require_local()
     if access_error:
         return access_error
     filters = {}
+    use_collation = False
 
     allowed_order_fields = {
         "client_ip",
@@ -127,9 +194,11 @@ def get_logs():
     if method:
         filters["method"] = method
 
-    response = request.query.get("response")
-    if response:
-        filters["response"] = response
+    # FIX: renamed local variable `response` → `response_val` to avoid shadowing
+    # the Bottle `response` object imported at module level.
+    response_val = request.query.get("response")
+    if response_val:
+        filters["response"] = response_val
 
     logType = request.query.get("logType")
     if logType:
@@ -149,10 +218,26 @@ def get_logs():
 
     search_text = request.query.get("search_text")
     if search_text:
+        # Fix mojibake (double-encoded UTF-8)
+        search_text = _fix_mojibake(search_text)
+        
+        # Build a regex where each Polish character matches both accented and
+        # plain ASCII variants; $options "i" covers case-insensitivity.
+        # NOTE: MongoDB $regex ignores collation, so collation alone cannot
+        # handle diacritics — character classes are required.
+        # The pattern also matches literal \uXXXX escape sequences that may
+        # have been stored by older records with ensure_ascii=True.
+        pattern = _build_search_regex(search_text)
+        print('[DEBUG get_logs] ========== SEARCH DEBUG ==========')
+        print('[DEBUG get_logs] search_text received (after mojibake fix):', repr(search_text))
+        print('[DEBUG get_logs] search_text bytes:', search_text.encode('utf-8'))
+        print('[DEBUG get_logs] regex pattern:', repr(pattern))
+      
         filters["$or"] = [
-            {"data": {"$regex": search_text, "$options": "i"}},
-            {"response_body": {"$regex": search_text, "$options": "i"}},
+            {"data": {"$regex": pattern, "$options": "i"}},
+            {"response_body": {"$regex": pattern, "$options": "i"}},
         ]
+        use_collation = True
 
     fk_id = request.query.get("fk_id")
     if fk_id:
@@ -195,7 +280,9 @@ def get_logs():
     page_size = DEFAULT_PAGE_SIZE
     skip = (page - 1) * page_size
 
-    total = collection.count_documents(filters)
+    collation = {"locale": "pl", "strength": 1} if use_collation else None
+
+    total = collection.count_documents(filters, collation=collation) if collation else collection.count_documents(filters)
     order_by = request.query.get("order_by", "timestamp")
     if order_by not in allowed_order_fields:
         response.status = 400
@@ -208,6 +295,8 @@ def get_logs():
     order_dir = 1 if order_dir_raw == "asc" else -1
 
     cursor = collection.find(filters).sort(order_by, order_dir).skip(skip).limit(page_size)
+    if collation:
+        cursor = cursor.collation(collation)
     items = [_serialize_log(doc) for doc in cursor]
 
     return {
@@ -219,9 +308,11 @@ def get_logs():
         "items": items,
     }
 
+
 @get(['/frontend-config', '/frontend-config/'])
 def get_frontend_config():
     _apply_cors_headers()
+    print('[DEBUG get_frontend_config] ========== CONFIG DEBUG ==========')
     config_path = os.path.join(os.path.dirname(__file__), "frontend.conf.json")
     whitelist_path = os.path.join(os.path.dirname(__file__), "whitelist.json")
     if not os.path.isfile(config_path):

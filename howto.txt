@@ -65,7 +65,10 @@ Group=www-data
 # Ścieżka do folderu, w którym znajduje się logger.py
 WorkingDirectory=/home/user/my_project
 # Ścieżka do interpretera python (najlepiej z venv)
-ExecStart=/home/user/my_project/venv/bin/python logger.py
+# -u flag enables unbuffered output so print() statements appear in journalctl immediately
+ExecStart=/home/user/my_project/venv/bin/python -u logger.py
+# Alternative: use environment variable instead of -u flag
+# Environment="PYTHONUNBUFFERED=1"
 Restart=always
 # Przerwa przed restartem po awarii
 RestartSec=5
