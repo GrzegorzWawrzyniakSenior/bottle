@@ -261,8 +261,8 @@ def get_logs():
         response.status = 400
         return {"status": "error", "message": "Page must be >= 1"}
 
-    page_size = DEFAULT_PAGE_SIZE
-    skip = (page - 1) * page_size
+    page_size = int(request.query.get("limit", DEFAULT_PAGE_SIZE))
+    skip = int(request.query.get("skip", (page - 1) * page_size))
 
     collation = {"locale": "pl", "strength": 1} if use_collation else None
 
