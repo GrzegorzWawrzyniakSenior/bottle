@@ -55,26 +55,24 @@ system_logs> db.getUsers()
 sudo nano /etc/systemd/system/bottle-logger.service
 =======================
 [Unit]
-Description=Bottle MongoDB Logger Service
+Description=Bottle MongoDB Logger Service (Gunicorn Production)
 After=network.target mongod.service
 
 [Service]
-# Zmień 'user' na swoją nazwę użytkownika na Ubuntu
-User=user
-Group=www-data
-# Ścieżka do folderu, w którym znajduje się logger.py
-WorkingDirectory=/home/user/my_project
-# Ścieżka do interpretera python (najlepiej z venv)
-# -u flag enables unbuffered output so print() statements appear in journalctl immediately
-ExecStart=/home/user/my_project/venv/bin/python -u logger.py
-# Alternative: use environment variable instead of -u flag
-# Environment="PYTHONUNBUFFERED=1"
+User=grono
+Group=grono
+WorkingDirectory=/var/grono/bottle
+ExecStart=/var/grono/bottle/venv/bin/gunicorn --workers 4 --worker-class sync --bind 127.0.0.1:8082 --timeout 30 --keep-alive 5 --max-requests 1000 --max-requests-jitter 50 --access-logfile - --error-logfile - --log-level info logger:app
+Environment="PYTHONUNBUFFERED=1"
 Restart=always
-# Przerwa przed restartem po awarii
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
+
 ============================
 
 

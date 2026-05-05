@@ -1,0 +1,25 @@
+[Unit]
+Description=Bottle MongoDB Logger Service
+After=network.target mongod.service
+
+[Service]
+# Run as the correct user
+User=boss
+Group=boss
+# Correct working directory
+WorkingDirectory=/home/boss/workspace/bottle
+# Correct path to python interpreter in venv
+# -u flag enables unbuffered output so logs appear immediately in journalctl
+ExecStart=/home/boss/workspace/bottle/venv/bin/python -u logger.py
+# Always restart on failure
+Restart=always
+# Wait 5 seconds before restarting
+RestartSec=5
+# Set environment for unbuffered Python output
+Environment="PYTHONUNBUFFERED=1"
+# Standard output and error logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

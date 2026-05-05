@@ -1,0 +1,18 @@
+[Unit]
+Description=Bottle MongoDB Logger Service (Gunicorn Production)
+After=network.target mongod.service
+
+[Service]
+User=grono
+Group=grono
+WorkingDirectory=/var/grono/bottle
+ExecStart=/var/grono/bottle/venv/bin/gunicorn --workers 4 --worker-class sync --bind 127.0.0.1:8082 --timeout 30 --keep-alive 5 --max-requests 1000 --max-requests-jitter 50 --access-logfile - --error-logfile - --log-level info logger:app
+Environment="PYTHONUNBUFFERED=1"
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

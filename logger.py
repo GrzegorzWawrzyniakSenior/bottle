@@ -1,10 +1,13 @@
-from bottle import get, post, run, request, response, route, ServerAdapter
+from bottle import Bottle, get, post, run, request, response, route, ServerAdapter
 import json
 import os
 import re
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timezone
 from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
+
+# Create Bottle application instance for WSGI servers (gunicorn, uWSGI, etc.)
+app = Bottle()
 
 
 class _QuietHandler(WSGIRequestHandler):
@@ -42,6 +45,24 @@ collection = db['user_logs']
 DEFAULT_PAGE_SIZE = 20
 ALLOWED_LOCAL_IPS = {"127.0.0.1", "::1"}
 ALLOWED_CORS_ORIGINS = {"*"}
+
+# Pre-compute file paths once at module load
+_BASE_DIR = os.path.dirname(__file__)
+_CONFIG_PATH = os.path.join(_BASE_DIR, "frontend.conf.json")
+_WHITELIST_PATH = os.path.join(_BASE_DIR, "whitelist.json")
+
+# Cache configuration for /frontend-config endpoint
+_config_cache = {
+    "data": None,
+    "whitelist": [],
+    "last_modified": 0,
+    "whitelist_modified": 0,
+    "last_loaded": 0,
+    "last_mtime_check": 0,  # Only check file mtimes every N seconds
+    "ttl": 60,  # Cache for 60 seconds
+    "mtime_check_interval": 5  # Check file modification times every 5 seconds
+}
+_config_cache_lock = False  # Simple lock for cache updates
 
 def _apply_cors_headers():
     origin = request.headers.get("Origin")
@@ -108,7 +129,7 @@ def _serialize_log(doc):
         doc["timestamp"] = doc["timestamp"].isoformat() + "Z"
     return doc
 
-@post(['/log', '/log/'])
+@app.post(['/log', '/log/'])
 def save_log():
     access_error = _require_local()
     if access_error:
@@ -121,7 +142,7 @@ def save_log():
         return {"status": "error", "message": "Brak danych JSON"}
 
     # Dodanie znacznika czasu po stronie serwera logów
-    log_data['timestamp'] = datetime.utcnow()
+    log_data['timestamp'] = datetime.now(timezone.utc)
     log_data['logtype'] = 'backend' if log_data.get('logtype') and log_data.get('logtype') == 'backend' else 'frontend'
 
     # Normalize `data` to a UTF-8 JSON string (no \uXXXX escapes)
@@ -160,7 +181,7 @@ def save_log():
 
 
 # Example GET: /log?method=GET&controller=Auth&user=42&created_from=2026-01-01&created_to=2026-02-01&page=1&order_by=timestamp&order_dir=desc
-@get(['/log', '/log/'])
+@app.get(['/log', '/log/'])
 def get_logs():
     access_error = _require_local()
     if access_error:
@@ -293,43 +314,110 @@ def get_logs():
     }
 
 
-@get(['/frontend-config', '/frontend-config/'])
+def _load_frontend_config_cached():
+    """Load frontend config with optimized caching (checks file mtimes only every 5s)."""
+    global _config_cache, _config_cache_lock
+    
+    current_time = datetime.now(timezone.utc).timestamp()
+    
+    # Fast path: Return cached data without checking file mtimes if checked recently
+    if _config_cache["data"] is not None:
+        time_since_mtime_check = current_time - _config_cache["last_mtime_check"]
+        if time_since_mtime_check < _config_cache["mtime_check_interval"]:
+            # Cache is fresh, skip file I/O completely
+            return _config_cache["data"], _config_cache["whitelist"], None
+    
+    # Slow path: Check if files have been modified (only runs every 5 seconds)
+    if not os.path.isfile(_CONFIG_PATH):
+        return None, None, "Config not found"
+    
+    try:
+        config_mtime = os.path.getmtime(_CONFIG_PATH)
+        whitelist_mtime = os.path.getmtime(_WHITELIST_PATH) if os.path.isfile(_WHITELIST_PATH) else 0
+    except OSError:
+        return None, None, "Failed to check file modification time"
+    
+    # Update the last mtime check timestamp
+    _config_cache["last_mtime_check"] = current_time
+    
+    # Return cached data if files haven't been modified and cache is valid
+    cache_age = current_time - _config_cache["last_loaded"]
+    if (
+        _config_cache["data"] is not None
+        and _config_cache["last_modified"] == config_mtime
+        and _config_cache["whitelist_modified"] == whitelist_mtime
+        and cache_age < _config_cache["ttl"]
+    ):
+        return _config_cache["data"], _config_cache["whitelist"], None
+    
+    # Prevent cache stampede (simple lock)
+    if _config_cache_lock:
+        # Another thread is loading, return stale cache if available
+        if _config_cache["data"] is not None:
+            return _config_cache["data"], _config_cache["whitelist"], None
+    
+    # Reload from disk (files were modified or cache expired)
+    _config_cache_lock = True
+    try:
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        
+        whitelist_ips = []
+        if os.path.isfile(_WHITELIST_PATH):
+            try:
+                with open(_WHITELIST_PATH, "r", encoding="utf-8") as f:
+                    whitelist_data = json.load(f)
+                whitelist_ips = whitelist_data.get("ip", []) if isinstance(whitelist_data, dict) else []
+            except (OSError, json.JSONDecodeError):
+                whitelist_ips = []
+        
+        # Update cache
+        _config_cache["data"] = config_data
+        _config_cache["whitelist"] = whitelist_ips
+        _config_cache["last_modified"] = config_mtime
+        _config_cache["whitelist_modified"] = whitelist_mtime
+        _config_cache["last_loaded"] = current_time
+        
+        return config_data, whitelist_ips, None
+        
+    except (OSError, json.JSONDecodeError) as e:
+        return None, None, f"Failed to load config: {str(e)}"
+    finally:
+        _config_cache_lock = False
+
+
+@app.get(['/frontend-config', '/frontend-config/'])
 def get_frontend_config():
     _apply_cors_headers()
-    config_path = os.path.join(os.path.dirname(__file__), "frontend.conf.json")
-    whitelist_path = os.path.join(os.path.dirname(__file__), "whitelist.json")
-    if not os.path.isfile(config_path):
-        response.status = 404
-        return {"status": "error", "message": "Config not found"}
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config_data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        response.status = 500
-        return {"status": "error", "message": "Failed to load config"}
-
-    whitelist_ips = []
-    if os.path.isfile(whitelist_path):
-        try:
-            with open(whitelist_path, "r", encoding="utf-8") as f:
-                whitelist_data = json.load(f)
-            whitelist_ips = whitelist_data.get("ip", []) if isinstance(whitelist_data, dict) else []
-        except (OSError, json.JSONDecodeError):
-            whitelist_ips = []
-
+    
+    # Load config from cache (much faster than disk I/O)
+    config_data, whitelist_ips, error = _load_frontend_config_cached()
+    
+    if error:
+        response.status = 500 if "Failed to load" in error else 404
+        return {"status": "error", "message": error}
+    
+    # Create a copy to avoid modifying cached data
+    config_data = dict(config_data)
+    
+    # Check if requester is whitelisted
     remote_addr = request.remote_addr or request.environ.get("REMOTE_ADDR")
     if remote_addr in whitelist_ips:
         config_data["maintenece_mode"] = False
-
+    
+    # Add HTTP caching headers (browsers can cache for 30 seconds)
+    response.set_header("Cache-Control", "public, max-age=30, s-maxage=60")
+    response.set_header("Vary", "Origin")
     response.content_type = "application/json"
+    
     return config_data
 
-@route(['/frontend-config', '/frontend-config/'], method='OPTIONS')
+@app.route(['/frontend-config', '/frontend-config/'], method='OPTIONS')
 def frontend_config_options():
     _apply_cors_headers()
     response.status = 204
     return ""
 
 if __name__ == "__main__":
-    # Uruchomienie na porcie 8081, aby nie kolidowało z FastAPI (domyślnie 8000)
-    run(host='0.0.0.0', port=8082, debug=False, server=QuietWSGIRefServer)
+    # Development server only - use gunicorn for production
+    run(app=app, host='0.0.0.0', port=8082, debug=False, server=QuietWSGIRefServer)
