@@ -60,7 +60,10 @@ _config_cache = {
     "last_loaded": 0,
     "last_mtime_check": 0,  # Only check file mtimes every N seconds
     "ttl": 60,  # Cache for 60 seconds
-    "mtime_check_interval": 5  # Check file modification times every 5 seconds
+    "mtime_check_interval": 5,  # Check file modification times every 5 seconds
+    # Pre-serialized JSON responses (fastest possible serving)
+    "json_normal": None,  # JSON string for normal users
+    "json_whitelisted": None,  # JSON string for whitelisted IPs (maintenance_mode=false)
 }
 _config_cache_lock = False  # Simple lock for cache updates
 
@@ -315,7 +318,7 @@ def get_logs():
 
 
 def _load_frontend_config_cached():
-    """Load frontend config with optimized caching (checks file mtimes only every 5s)."""
+    """Load frontend config with optimized caching and pre-serialized JSON responses."""
     global _config_cache, _config_cache_lock
     
     current_time = datetime.now(timezone.utc).timestamp()
@@ -325,17 +328,17 @@ def _load_frontend_config_cached():
         time_since_mtime_check = current_time - _config_cache["last_mtime_check"]
         if time_since_mtime_check < _config_cache["mtime_check_interval"]:
             # Cache is fresh, skip file I/O completely
-            return _config_cache["data"], _config_cache["whitelist"], None
+            return _config_cache["data"], _config_cache["whitelist"], _config_cache["json_normal"], _config_cache["json_whitelisted"], None
     
     # Slow path: Check if files have been modified (only runs every 5 seconds)
     if not os.path.isfile(_CONFIG_PATH):
-        return None, None, "Config not found"
+        return None, None, None, None, "Config not found"
     
     try:
         config_mtime = os.path.getmtime(_CONFIG_PATH)
         whitelist_mtime = os.path.getmtime(_WHITELIST_PATH) if os.path.isfile(_WHITELIST_PATH) else 0
     except OSError:
-        return None, None, "Failed to check file modification time"
+        return None, None, None, None, "Failed to check file modification time"
     
     # Update the last mtime check timestamp
     _config_cache["last_mtime_check"] = current_time
@@ -348,13 +351,13 @@ def _load_frontend_config_cached():
         and _config_cache["whitelist_modified"] == whitelist_mtime
         and cache_age < _config_cache["ttl"]
     ):
-        return _config_cache["data"], _config_cache["whitelist"], None
+        return _config_cache["data"], _config_cache["whitelist"], _config_cache["json_normal"], _config_cache["json_whitelisted"], None
     
     # Prevent cache stampede (simple lock)
     if _config_cache_lock:
         # Another thread is loading, return stale cache if available
         if _config_cache["data"] is not None:
-            return _config_cache["data"], _config_cache["whitelist"], None
+            return _config_cache["data"], _config_cache["whitelist"], _config_cache["json_normal"], _config_cache["json_whitelisted"], None
     
     # Reload from disk (files were modified or cache expired)
     _config_cache_lock = True
@@ -371,17 +374,28 @@ def _load_frontend_config_cached():
             except (OSError, json.JSONDecodeError):
                 whitelist_ips = []
         
+        # Pre-serialize JSON responses for maximum speed
+        # Normal response (as-is from file)
+        json_normal = json.dumps(config_data, ensure_ascii=False)
+        
+        # Whitelisted response (maintenance_mode forced to false)
+        config_whitelisted = dict(config_data)
+        config_whitelisted["maintenece_mode"] = False
+        json_whitelisted = json.dumps(config_whitelisted, ensure_ascii=False)
+        
         # Update cache
         _config_cache["data"] = config_data
         _config_cache["whitelist"] = whitelist_ips
         _config_cache["last_modified"] = config_mtime
         _config_cache["whitelist_modified"] = whitelist_mtime
         _config_cache["last_loaded"] = current_time
+        _config_cache["json_normal"] = json_normal
+        _config_cache["json_whitelisted"] = json_whitelisted
         
-        return config_data, whitelist_ips, None
+        return config_data, whitelist_ips, json_normal, json_whitelisted, None
         
     except (OSError, json.JSONDecodeError) as e:
-        return None, None, f"Failed to load config: {str(e)}"
+        return None, None, None, None, f"Failed to load config: {str(e)}"
     finally:
         _config_cache_lock = False
 
@@ -390,27 +404,24 @@ def _load_frontend_config_cached():
 def get_frontend_config():
     _apply_cors_headers()
     
-    # Load config from cache (much faster than disk I/O)
-    config_data, whitelist_ips, error = _load_frontend_config_cached()
+    # Load config from cache (with pre-serialized JSON)
+    config_data, whitelist_ips, json_normal, json_whitelisted, error = _load_frontend_config_cached()
     
     if error:
         response.status = 500 if "Failed to load" in error else 404
         return {"status": "error", "message": error}
     
-    # Create a copy to avoid modifying cached data
-    config_data = dict(config_data)
-    
-    # Check if requester is whitelisted
-    remote_addr = request.remote_addr or request.environ.get("REMOTE_ADDR")
-    if remote_addr in whitelist_ips:
-        config_data["maintenece_mode"] = False
-    
-    # Add HTTP caching headers (browsers can cache for 30 seconds)
+    # Set headers once
+    response.content_type = "application/json; charset=utf-8"
     response.set_header("Cache-Control", "public, max-age=30, s-maxage=60")
     response.set_header("Vary", "Origin")
-    response.content_type = "application/json"
     
-    return config_data
+    # Check if requester is whitelisted and return pre-serialized JSON
+    remote_addr = request.remote_addr or request.environ.get("REMOTE_ADDR")
+    if remote_addr in whitelist_ips:
+        return json_whitelisted  # Already serialized, fastest possible response
+    
+    return json_normal  # Already serialized, fastest possible response
 
 @app.route(['/frontend-config', '/frontend-config/'], method='OPTIONS')
 def frontend_config_options():
